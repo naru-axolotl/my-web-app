@@ -336,7 +336,7 @@ function App() {
         <section className="welcome-row">
           <div>
             <p className="eyebrow">YOUR STUDY, YOUR PACE</p>
-            <h1>積み重ねを、<span>見えるかたちに。</span></h1>
+            <h1><span>心の中で思ったならッ！その時既に行動は終わっているんだッ！</span></h1>
           </div>
           <div className="today-summary">
             <span className="summary-label">今日の学習時間</span>
