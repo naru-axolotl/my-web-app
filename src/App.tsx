@@ -1,6 +1,30 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
+type SubjectKey = 'japanese' | 'math' | 'english' | 'science' | 'social'
+type ScoreMap = Record<string, number>
+type ResultSubject = { id: string; name: string; custom?: boolean }
+type ExamRecord = {
+  id: string
+  grade: number
+  round: number
+  date: string
+  scores: ScoreMap
+  memo: string
+  deviation?: number
+  rank?: number
+  totalCount?: number
+}
+type MockRecord = {
+  id: string
+  name: string
+  date: string
+  scores: ScoreMap
+  memo: string
+  deviation?: number
+  rank?: number
+  totalCount?: number
+}
 type Subject = { id: string; name: string; custom?: boolean }
 type StudyRecord = {
   id: string
@@ -15,6 +39,33 @@ type StudyRecord = {
 }
 type Mode = 'stopwatch' | 'timer'
 
+const SUBJECT_KEYS: SubjectKey[] = ['japanese', 'math', 'english', 'science', 'social']
+const SUBJECT_LABELS: Record<SubjectKey, string> = {
+  japanese: '国語',
+  math: '数学',
+  english: '英語',
+  science: '理科',
+  social: '社会',
+}
+const EMPTY_SCORE_VALUES: Record<SubjectKey, string> = {
+  japanese: '',
+  math: '',
+  english: '',
+  science: '',
+  social: '',
+}
+const STORAGE_KEYS = {
+  exams: 'result-log-exams-v1',
+  mocks: 'result-log-mocks-v1',
+  resultSubjects: 'result-log-subjects-v1',
+}
+const DEFAULT_RESULT_SUBJECTS: ResultSubject[] = [
+  { id: 'japanese', name: '国語' },
+  { id: 'math', name: '数学' },
+  { id: 'english', name: '英語' },
+  { id: 'science', name: '理科' },
+  { id: 'social', name: '社会' },
+]
 const DEFAULT_SUBJECTS: Subject[] = [
   { id: 'japanese', name: '国語' },
   { id: 'math', name: '数学' },
@@ -26,6 +77,11 @@ const DAY_MS = 24 * 60 * 60 * 1000
 const RECORDS_KEY = 'studylog-records-v1'
 const SUBJECTS_KEY = 'studylog-subjects-v1'
 const WEEKLY_GOAL_KEY = 'studylog-weekly-goal-hours-v1'
+
+function parseInteger(value: string, fallback: number) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
 
 function parseStudyData(value: unknown): { subjects: Subject[]; records: StudyRecord[] } | null {
   if (!value || typeof value !== 'object') return null
@@ -57,13 +113,35 @@ function parseStudyData(value: unknown): { subjects: Subject[]; records: StudyRe
   }
 }
 
-function loadStored<T,>(key: string, fallback: T): T {
+function loadStored<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback
   try {
-    const value = localStorage.getItem(key)
+    const value = window.localStorage.getItem(key)
     return value ? (JSON.parse(value) as T) : fallback
   } catch {
     return fallback
   }
+}
+
+function createEmptyScores(): Record<SubjectKey, string> {
+  return { ...EMPTY_SCORE_VALUES }
+}
+
+function createEmptyResultScores(subjects: ResultSubject[]): Record<string, string> {
+  return Object.fromEntries(subjects.map((subject) => [subject.id, '']))
+}
+
+function getAverageFromScores(scores: ScoreMap) {
+  const validScores = Object.values(scores).filter((score) => Number.isFinite(score) && score >= 0)
+  if (validScores.length === 0) return 0
+  return validScores.reduce((sum, score) => sum + score, 0) / validScores.length
+}
+
+function formatJapaneseDate(dateValue: string) {
+  if (!dateValue) return '未設定'
+  const date = new Date(`${dateValue}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return dateValue
+  return new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric' }).format(date)
 }
 
 function dateKey(date: Date) {
@@ -91,6 +169,12 @@ function localDateTimeValue(date: Date) {
 }
 
 function App() {
+  const today = new Date().toISOString().slice(0, 10)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [activeMenu, setActiveMenu] = useState<'results' | 'studylog'>('results')
+
+  const [resultSubjects, setResultSubjects] = useState<ResultSubject[]>(() => loadStored(STORAGE_KEYS.resultSubjects, DEFAULT_RESULT_SUBJECTS))
+  const [newResultSubject, setNewResultSubject] = useState('')
   const [subjects, setSubjects] = useState<Subject[]>(() => loadStored(SUBJECTS_KEY, DEFAULT_SUBJECTS))
   const [records, setRecords] = useState<StudyRecord[]>(() => loadStored(RECORDS_KEY, []))
   const [selectedSubjectId, setSelectedSubjectId] = useState(DEFAULT_SUBJECTS[0].id)
@@ -114,6 +198,75 @@ function App() {
   const [pastMemo, setPastMemo] = useState('')
   const [pastRecordMessage, setPastRecordMessage] = useState('')
   const importInputRef = useRef<HTMLInputElement>(null)
+
+  const [examRecords, setExamRecords] = useState<ExamRecord[]>(() =>
+    loadStored(STORAGE_KEYS.exams, [
+      {
+        id: 'exam-demo-1',
+        grade: 2,
+        round: 1,
+        date: '2026-04-15',
+        memo: '英語のリスニングに時間をかけた',
+        scores: { japanese: 86, math: 92, english: 79, science: 88, social: 91 },
+      },
+      {
+        id: 'exam-demo-2',
+        grade: 2,
+        round: 2,
+        date: '2026-07-10',
+        memo: '数学の応用問題が伸びた',
+        scores: { japanese: 90, math: 96, english: 84, science: 89, social: 87 },
+      },
+    ]),
+  )
+  const [mockRecords, setMockRecords] = useState<MockRecord[]>(() =>
+    loadStored(STORAGE_KEYS.mocks, [
+      {
+        id: 'mock-demo-1',
+        name: '4月全国模試',
+        date: '2026-04-03',
+        memo: '英語の偏差値を上げたい',
+        scores: { japanese: 82, math: 78, english: 73, science: 80, social: 84 },
+      },
+      {
+        id: 'mock-demo-2',
+        name: '4月全国模試',
+        date: '2026-05-20',
+        memo: '数学をもう一段伸ばす',
+        scores: { japanese: 85, math: 87, english: 77, science: 82, social: 88 },
+      },
+      {
+        id: 'mock-demo-3',
+        name: '7月学力診断',
+        date: '2026-07-18',
+        memo: '理科の総合問題に注意',
+        scores: { japanese: 89, math: 81, english: 86, science: 74, social: 90 },
+      },
+    ]),
+  )
+  const [examForm, setExamForm] = useState({
+    grade: '2',
+    round: '1',
+    date: today,
+    memo: '',
+    deviation: '',
+    rank: '',
+    total: '',
+    scores: createEmptyResultScores(DEFAULT_RESULT_SUBJECTS),
+  })
+  const [mockForm, setMockForm] = useState({
+    name: '',
+    date: today,
+    memo: '',
+    deviation: '',
+    rank: '',
+    total: '',
+    scores: createEmptyResultScores(DEFAULT_RESULT_SUBJECTS),
+  })
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.resultSubjects, JSON.stringify(resultSubjects))
+  }, [resultSubjects])
 
   useEffect(() => {
     localStorage.setItem(RECORDS_KEY, JSON.stringify(records))
@@ -199,6 +352,197 @@ function App() {
           : Math.ceil(maxRecordedHours / 4) * 4
   const chartScaleMs = chartScaleHours * 60 * 60 * 1000
   const sortedRecords = [...records].sort((left, right) => right.endedAt - left.endedAt)
+
+  useEffect(() => {
+    setExamForm((current) => ({
+      ...current,
+      scores: {
+        ...createEmptyResultScores(resultSubjects),
+        ...current.scores,
+      },
+    }))
+    setMockForm((current) => ({
+      ...current,
+      scores: {
+        ...createEmptyResultScores(resultSubjects),
+        ...current.scores,
+      },
+    }))
+  }, [resultSubjects])
+
+  const groupedMockRecords = useMemo(() => {
+    const grouped = new Map<string, MockRecord[]>()
+    for (const record of mockRecords) {
+      const list = grouped.get(record.name) ?? []
+      list.push(record)
+      grouped.set(record.name, list)
+    }
+
+    return [...grouped.entries()]
+      .map(([name, entries]) => ({
+        name,
+        records: [...entries].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'ja'))
+  }, [mockRecords])
+
+  const savedExamAverage = examRecords.length > 0
+    ? examRecords.reduce((sum, record) => sum + getAverageFromScores(record.scores), 0) / examRecords.length
+    : 0
+
+  const handleExamFieldChange = <K extends keyof typeof examForm>(field: K, value: (typeof examForm)[K]) => {
+    setExamForm((current) => ({ ...current, [field]: value }))
+  }
+
+  const handleMockFieldChange = <K extends keyof typeof mockForm>(field: K, value: (typeof mockForm)[K]) => {
+    setMockForm((current) => ({ ...current, [field]: value }))
+  }
+
+  const updateExamScore = (subjectId: string, value: string) => {
+    setExamForm((current) => ({
+      ...current,
+      scores: {
+        ...current.scores,
+        [subjectId]: value,
+      },
+    }))
+  }
+
+  const updateMockScore = (subjectId: string, value: string) => {
+    setMockForm((current) => ({
+      ...current,
+      scores: {
+        ...current.scores,
+        [subjectId]: value,
+      },
+    }))
+  }
+
+  const addResultSubject = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const name = newResultSubject.trim()
+    if (!name || resultSubjects.some((subject) => subject.name === name)) return
+
+    const subject: ResultSubject = {
+      id: crypto.randomUUID(),
+      name,
+      custom: true,
+    }
+
+    setResultSubjects((current) => [...current, subject])
+    setNewResultSubject('')
+  }
+
+  const removeResultSubject = (id: string) => {
+    setResultSubjects((current) => current.filter((subject) => subject.id !== id))
+  }
+
+  const saveExamResult = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const grade = parseInteger(examForm.grade, 0)
+    const round = parseInteger(examForm.round, 0)
+    if (grade <= 0 || round <= 0 || !examForm.date || resultSubjects.length === 0) return
+
+    const scores: ScoreMap = Object.fromEntries(
+      resultSubjects.map((subject) => [subject.id, parseInteger(examForm.scores[subject.id] || '0', 0)]),
+    )
+
+    const hasScore = Object.values(scores).some((score) => score > 0)
+    if (!hasScore) return
+
+    const deviation = examForm.deviation.trim() === '' ? undefined : Number(examForm.deviation)
+    const rank = examForm.rank.trim() === '' ? undefined : parseInteger(examForm.rank, 0)
+    const totalCount = examForm.total.trim() === '' ? undefined : parseInteger(examForm.total, 0)
+
+    const record: ExamRecord = {
+      id: crypto.randomUUID(),
+      grade,
+      round,
+      date: examForm.date,
+      memo: examForm.memo.trim(),
+      scores,
+      ...(deviation !== undefined && Number.isFinite(deviation) ? { deviation } : {}),
+      ...(rank !== undefined && rank > 0 ? { rank } : {}),
+      ...(totalCount !== undefined && totalCount > 0 ? { totalCount } : {}),
+    }
+
+    setExamRecords((current) => {
+      const next = [record, ...current].sort((a, b) => b.date.localeCompare(a.date))
+      window.localStorage.setItem(STORAGE_KEYS.exams, JSON.stringify(next))
+      return next
+    })
+
+    setExamForm({
+      grade: String(grade),
+      round: String(round + 1),
+      date: examForm.date,
+      memo: '',
+      deviation: '',
+      rank: '',
+      total: '',
+      scores: createEmptyResultScores(resultSubjects),
+    })
+  }
+
+  const saveMockResult = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const name = mockForm.name.trim()
+    if (!name || !mockForm.date || resultSubjects.length === 0) return
+
+    const scores: ScoreMap = Object.fromEntries(
+      resultSubjects.map((subject) => [subject.id, parseInteger(mockForm.scores[subject.id] || '0', 0)]),
+    )
+
+    const hasScore = Object.values(scores).some((score) => score > 0)
+    if (!hasScore) return
+
+    const deviation = mockForm.deviation.trim() === '' ? undefined : Number(mockForm.deviation)
+    const rank = mockForm.rank.trim() === '' ? undefined : parseInteger(mockForm.rank, 0)
+    const totalCount = mockForm.total.trim() === '' ? undefined : parseInteger(mockForm.total, 0)
+
+    const record: MockRecord = {
+      id: crypto.randomUUID(),
+      name,
+      date: mockForm.date,
+      memo: mockForm.memo.trim(),
+      scores,
+      ...(deviation !== undefined && Number.isFinite(deviation) ? { deviation } : {}),
+      ...(rank !== undefined && rank > 0 ? { rank } : {}),
+      ...(totalCount !== undefined && totalCount > 0 ? { totalCount } : {}),
+    }
+
+    setMockRecords((current) => {
+      const next = [record, ...current].sort((a, b) => b.date.localeCompare(a.date))
+      window.localStorage.setItem(STORAGE_KEYS.mocks, JSON.stringify(next))
+      return next
+    })
+
+    setMockForm({
+      name: '',
+      date: today,
+      memo: '',
+      deviation: '',
+      rank: '',
+      total: '',
+      scores: createEmptyResultScores(resultSubjects),
+    })
+  }
+
+  const deleteExamRecord = (id: string) => {
+    setExamRecords((current) => {
+      const next = current.filter((record) => record.id !== id)
+      window.localStorage.setItem(STORAGE_KEYS.exams, JSON.stringify(next))
+      return next
+    })
+  }
+
+  const deleteMockRecord = (id: string) => {
+    setMockRecords((current) => {
+      const next = current.filter((record) => record.id !== id)
+      window.localStorage.setItem(STORAGE_KEYS.mocks, JSON.stringify(next))
+      return next
+    })
+  }
 
   function startSession() {
     setActiveMode(mode)
@@ -310,217 +654,529 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="#top" aria-label="StudyLog ホーム">
-          <span className="brand-mark"><span /></span>
-          <span>study<span className="brand-light">log</span></span>
-        </a>
-        <div className="topbar-date">
-          <span className="live-dot" />
-          {new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' }).format(new Date())}
-        </div>
-        <div className="topbar-actions">
-          <input ref={importInputRef} className="file-input" type="file" accept=".json,application/json" onChange={importData} aria-label="読み込むJSONファイル" />
-          <button className="import-button" type="button" onClick={() => importInputRef.current?.click()} aria-label="JSONファイルを読み込む">
-            <span aria-hidden="true">↑</span> JSONを読み込む
-          </button>
-          <button className="export-button" type="button" onClick={exportData} aria-label="学習記録をJSONファイルに保存">
-            <span className="export-icon" aria-hidden="true">↓</span> JSONを書き出す
-          </button>
-        </div>
+    <div className="results-shell">
+      <header className="results-topbar">
+        <button
+          type="button"
+          className="hamburger-button"
+          aria-label="メニューを開く"
+          onClick={() => setMenuOpen((current) => !current)}
+        >
+          <span />
+          <span />
+          <span />
+        </button>
+        <div className="brand-copy">Result Log</div>
       </header>
 
-      <main id="top" className="dashboard">
-        {importMessage && <p className={`import-message ${importMessage.startsWith('JSONを読み込めませんでした') ? 'is-error' : ''}`} role="status">{importMessage}</p>}
-        <section className="welcome-row">
-          <div>
-            <p className="eyebrow">YOUR STUDY, YOUR PACE</p>
-            <h1><span>心の中で思ったならッ！その時既に行動は終わっているんだッ！</span></h1>
-          </div>
-          <div className="today-summary">
-            <span className="summary-label">今日の学習時間</span>
-            <strong>{formatDuration(todayTotal)}</strong>
-            <span className="summary-sub">{todayRecords.length} セッション</span>
-          </div>
-        </section>
+      <aside className={`menu-panel ${menuOpen ? 'is-open' : ''}`}>
+        <button
+          type="button"
+          className={activeMenu === 'results' ? 'menu-item is-active' : 'menu-item'}
+          onClick={() => {
+            setActiveMenu('results')
+            setMenuOpen(false)
+          }}
+        >
+          結果保存欄
+        </button>
+        <button
+          type="button"
+          className={activeMenu === 'studylog' ? 'menu-item is-active' : 'menu-item'}
+          onClick={() => {
+            setActiveMenu('studylog')
+            setMenuOpen(false)
+          }}
+        >
+          学習記録
+        </button>
+      </aside>
 
-        <div className="main-grid">
-          <section className="timer-panel" aria-label="学習計測">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">FOCUS SESSION</p>
-                <h2>学習を記録する</h2>
-              </div>
-              <span className={`session-status ${isRunning ? 'is-live' : ''}`}>
-                <span />{isRunning ? '計測中' : '待機中'}
-              </span>
+      {menuOpen && <button type="button" className="backdrop" aria-label="メニューを閉じる" onClick={() => setMenuOpen(false)} />}
+
+      {activeMenu === 'results' ? (
+        <main className="results-content">
+          <section className="page-header">
+            <div>
+              <p className="eyebrow">RESULTS</p>
+              <h1>定期試験・模試の結果を見る</h1>
             </div>
-
-            <div className="mode-switch" role="tablist" aria-label="計測方法">
-              <button type="button" role="tab" aria-selected={mode === 'stopwatch'} className={mode === 'stopwatch' ? 'selected' : ''} disabled={isRunning} onClick={() => setMode('stopwatch')}>
-                <span className="mode-icon stopwatch-icon" />ストップウォッチ
-              </button>
-              <button type="button" role="tab" aria-selected={mode === 'timer'} className={mode === 'timer' ? 'selected' : ''} disabled={isRunning} onClick={() => setMode('timer')}>
-                <span className="mode-icon timer-icon" />タイマー
-              </button>
-            </div>
-
-            {mode === 'timer' && (
-              <label className="duration-control">
-                <span>時間を設定</span>
-                <span className="duration-input-wrap">
-                  <input type="number" min="1" max="1440" value={durationMinutes} disabled={isRunning} onChange={(event) => setDurationMinutes(Math.min(1440, Math.max(1, Number(event.target.value) || 1)))} />
-                  <span>分</span>
-                </span>
-              </label>
-            )}
-
-            <div className={`clock-face ${isRunning ? 'clock-running' : ''}`} aria-live="off">
-              <span className="clock-caption">{activeMode === 'timer' && isRunning ? 'REMAINING' : 'ELAPSED TIME'}</span>
-              <strong>{formatDuration(displayedMs)}</strong>
-              <span className="clock-decoration" />
-            </div>
-
-            <div className="session-fields">
-              <label className="field-label" htmlFor="subject-select">教科</label>
-              <select id="subject-select" value={selectedSubjectId} disabled={isRunning} onChange={(event) => setSelectedSubjectId(event.target.value)}>
-                {subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.name}</option>)}
-              </select>
-              <label className="field-label" htmlFor="study-note">学習メモ <span>任意</span></label>
-              <input id="study-note" className="memo-input" type="text" placeholder="例：二次関数の問題演習" value={memo} onChange={(event) => setMemo(event.target.value)} maxLength={100} />
-            </div>
-
-            <div className="timer-actions">
-              {!isRunning ? (
-                <button type="button" className="start-button" onClick={startSession}><span className="play-icon" />計測を開始</button>
-              ) : (
-                <button type="button" className="stop-button" onClick={stopAndRecord}><span className="stop-icon" />記録して停止</button>
-              )}
-              <p>{isRunning ? '停止するとここまでの時間を記録します' : '途中で停止した場合も、その時点で記録されます'}</p>
-            </div>
-
-            <div className="weekly-goal">
-              <div className="weekly-goal-heading">
-                <div><p className="eyebrow">THIS WEEK</p><h3>今週の目標勉強時間</h3></div>
-                <label className="weekly-goal-input">
-                  <input type="number" min="1" max="168" step="0.5" value={weeklyGoalHours} onChange={(event) => setWeeklyGoalHours(Math.min(168, Math.max(1, Number(event.target.value) || 1)))} aria-label="今週の目標勉強時間" />
-                  <span>時間</span>
-                </label>
-              </div>
-              <div className="weekly-goal-summary">
-                <strong>{formatDuration(weeklyTotal)}</strong>
-                <span>{weeklyGoalReached ? '今週の目標を達成しました' : `あと ${formatDuration(weeklyGoalMs - weeklyTotal)} で達成`}</span>
-              </div>
-              <div className="weekly-progress-track" role="progressbar" aria-label="今週の目標達成率" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(weeklyProgress)}>
-                <span className={weeklyGoalReached ? 'is-complete' : ''} style={{ width: `${weeklyProgress}%` }} />
-              </div>
+            <div className="summary-badge">
+              <span>平均点</span>
+              <strong>{savedExamAverage.toFixed(1)}点</strong>
             </div>
           </section>
 
-          <aside className="side-column">
-            <section className="manual-panel">
-              <div className="section-heading">
-                <div><p className="eyebrow">PAST SESSION</p><h2>過去の学習を記録</h2></div>
+          <section className="panel-grid">
+            <article className="result-panel full-span">
+              <div className="panel-header">
+                <h2>教科を管理</h2>
               </div>
-              <form className="manual-form" onSubmit={addPastRecord}>
-                <label>教科
-                  <select value={pastSubjectId} onChange={(event) => setPastSubjectId(event.target.value)}>
-                    {subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.name}</option>)}
-                  </select>
-                </label>
-                <label>開始日時
-                  <input type="datetime-local" value={pastStartedAt} onChange={(event) => setPastStartedAt(event.target.value)} required />
-                </label>
-                <label>学習時間（分）
-                  <input type="number" min="1" max="1440" step="1" value={pastDurationMinutes} onChange={(event) => setPastDurationMinutes(event.target.value)} required />
-                </label>
-                <label>学習した量
-                  <span className="quantity-inputs">
-                    <input type="number" min="0.01" step="any" value={pastQuantity} onChange={(event) => setPastQuantity(event.target.value)} required aria-label="学習した量" />
-                    <input type="text" value={pastQuantityUnit} onChange={(event) => setPastQuantityUnit(event.target.value)} maxLength={12} required aria-label="量の単位" placeholder="ページ、問など" />
-                  </span>
-                </label>
-                <label className="manual-memo-field">学習メモ <span>任意</span>
-                  <input type="text" value={pastMemo} onChange={(event) => setPastMemo(event.target.value)} maxLength={100} placeholder="例：二次関数の問題演習" />
-                </label>
-                <button className="manual-submit" type="submit">過去の学習を追加</button>
-              </form>
-              {pastRecordMessage && <p className="manual-status" role="status">{pastRecordMessage}</p>}
-            </section>
-
-            <section className="subjects-panel">
-              <div className="section-heading">
-                <div><p className="eyebrow">YOUR SUBJECTS</p><h2>教科</h2></div>
-                <span className="subject-count">{subjects.length} 教科</span>
-              </div>
-              <div className="subject-list">
-                {subjects.map((subject, index) => (
-                  <div className="subject-row" key={subject.id}>
-                    <span className={`subject-swatch swatch-${index % 5}`} />
+              <div className="result-subject-list">
+                {resultSubjects.map((subject) => (
+                  <div className="result-subject-row" key={subject.id}>
                     <span>{subject.name}</span>
-                    {subject.custom && <span className="custom-label">追加</span>}
-                    {subject.custom && <button className="remove-subject" type="button" aria-label={`${subject.name}を削除`} disabled={isRunning} onClick={() => {
-                      setSubjects((current) => current.filter((item) => item.id !== subject.id))
-                      if (selectedSubjectId === subject.id) setSelectedSubjectId(DEFAULT_SUBJECTS[0].id)
-                    }}>×</button>}
+                    {subject.custom && (
+                      <button type="button" className="delete-button" onClick={() => removeResultSubject(subject.id)}>削除</button>
+                    )}
                   </div>
                 ))}
               </div>
-              <form className="add-subject-form" onSubmit={addSubject}>
-                <input aria-label="追加する教科名" placeholder="教科を追加" value={newSubject} onChange={(event) => setNewSubject(event.target.value)} maxLength={20} />
-                <button type="submit" aria-label="教科を追加" disabled={isRunning || !newSubject.trim()}><span>+</span></button>
+              <form onSubmit={addResultSubject} className="result-subject-form">
+                <input
+                  type="text"
+                  value={newResultSubject}
+                  onChange={(event) => setNewResultSubject(event.target.value)}
+                  placeholder="教科名を追加"
+                  maxLength={20}
+                />
+                <button type="submit" className="save-button small">教科を追加</button>
               </form>
-            </section>
+            </article>
 
-            <section className="recent-panel">
-              <div className="section-heading">
-                <div><p className="eyebrow">STUDY RECORDS</p><h2>学習記録</h2></div>
-                <span className="record-count">{records.length} 件</span>
+            <article className="result-panel">
+              <div className="panel-header">
+                <h2>定期試験を追加</h2>
               </div>
-              {sortedRecords.length ? (
-                <ul className="record-list" tabIndex={0} aria-label="学習記録一覧">
-                  {sortedRecords.map((record) => (
-                    <li className="record-row" key={record.id}>
-                      <span className="record-dot" />
-                      <div className="record-info">
-                        <strong>{record.subjectName}</strong>
-                        <span>{formatClock(record.startedAt)} – {formatClock(record.endedAt)}{record.quantity !== undefined ? ` ・ ${record.quantity} ${record.quantityUnit ?? ''}` : ''}{record.memo ? ` ・ ${record.memo}` : ''}</span>
-                      </div>
-                      <b>{formatDuration(record.durationMs).slice(0, 5)}</b>
-                      <button className="delete-record" type="button" aria-label={`${record.subjectName}の学習記録を削除`} onClick={() => deleteRecord(record.id)}>×</button>
-                    </li>
-                  ))}
-                </ul>
-              ) : <p className="empty-records">学習記録はありません。</p>}
-            </section>
-          </aside>
-        </div>
-
-        <section className="chart-panel">
-          <div className="chart-heading">
-            <div><p className="eyebrow">LAST 7 DAYS</p><h2>学習の記録</h2></div>
-            <div className="chart-legend"><span />学習時間</div>
-          </div>
-          <div className="chart-area">
-            {recordedDays.length > 0 && <div className="chart-guides" aria-hidden="true"><span>{chartScaleHours}h</span><span>{chartScaleHours / 2}h</span><span>0h</span></div>}
-            <div className="chart-scroll" role="region" aria-label="直近3週間の学習記録。横にスクロールできます" tabIndex={0}>
-              {recordedDays.length > 0 ? (
-                <div className="chart-bars">
-                  {recordedDays.map((day) => {
-                    const height = Math.min(100, (day.total / chartScaleMs) * 100)
-                    return <div className="chart-day" key={day.key} title={`${day.key}: ${formatDuration(day.total)}`}>
-                      <span className="bar-label"><span>{day.label}</span><span>{day.dateLabel}</span></span>
-                      <div className="bar-track"><span className={`bar-fill ${day.key === todayKey ? 'bar-today' : ''}`} style={{ height: `${height}%` }} /></div>
-                      <span className="bar-value">{(day.total / 3_600_000).toFixed(day.total >= 3_600_000 ? 0 : 1)}h</span>
-                    </div>
-                  })}
+              <form onSubmit={saveExamResult} className="result-form">
+                <div className="two-column">
+                  <label>
+                    学年
+                    <input
+                      type="number"
+                      min="1"
+                      max="6"
+                      value={examForm.grade}
+                      onChange={(event) => handleExamFieldChange('grade', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    第何回
+                    <input
+                      type="number"
+                      min="1"
+                      max="20"
+                      value={examForm.round}
+                      onChange={(event) => handleExamFieldChange('round', event.target.value)}
+                    />
+                  </label>
                 </div>
-              ) : <p className="chart-empty">直近3週間の学習記録はありません。</p>}
+
+                <label>
+                  実施日
+                  <input
+                    type="date"
+                    value={examForm.date}
+                    onChange={(event) => handleExamFieldChange('date', event.target.value)}
+                  />
+                </label>
+
+                <div className="score-grid">
+                  {resultSubjects.map((subject) => (
+                    <label key={subject.id}>
+                      {subject.name}
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={examForm.scores[subject.id] ?? ''}
+                        onChange={(event) => updateExamScore(subject.id, event.target.value)}
+                      />
+                    </label>
+                  ))}
+                </div>
+
+                <div className="two-column meta-column">
+                  <label>
+                    偏差値
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.1"
+                      value={examForm.deviation}
+                      onChange={(event) => handleExamFieldChange('deviation', event.target.value)}
+                      placeholder="例：60"
+                    />
+                  </label>
+                  <label>
+                    順位
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={examForm.rank}
+                      onChange={(event) => handleExamFieldChange('rank', event.target.value)}
+                      placeholder="例：12"
+                    />
+                  </label>
+                  <label className="full-span-field">
+                    全体人数
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={examForm.total}
+                      onChange={(event) => handleExamFieldChange('total', event.target.value)}
+                      placeholder="例：180"
+                    />
+                  </label>
+                </div>
+
+                <label>
+                  メモ
+                  <textarea
+                    rows={3}
+                    value={examForm.memo}
+                    onChange={(event) => handleExamFieldChange('memo', event.target.value)}
+                    placeholder="例：英語のリスニングが良くなった"
+                  />
+                </label>
+
+                <button type="submit" className="save-button">結果を保存</button>
+              </form>
+            </article>
+
+            <article className="result-panel">
+              <div className="panel-header">
+                <h2>保存済みの定期試験</h2>
+              </div>
+              <div className="record-list">
+                {examRecords.length === 0 ? (
+                  <p className="empty-message">まだ定期試験の結果がありません。</p>
+                ) : (
+                  examRecords.map((record) => (
+                    <div key={record.id} className="record-card">
+                      <div className="record-head">
+                        <div>
+                          <strong>{record.grade}年生第{record.round}回定期試験</strong>
+                          <span>{formatJapaneseDate(record.date)}</span>
+                        </div>
+                        <button type="button" className="delete-button" onClick={() => deleteExamRecord(record.id)}>削除</button>
+                      </div>
+                      <div className="record-scores">
+                        {SUBJECT_KEYS.map((subject) => (
+                          <div key={subject} className="score-chip">
+                            <span>{SUBJECT_LABELS[subject]}</span>
+                            <b>{record.scores[subject]}点</b>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="record-summary">
+                        <span>平均</span>
+                        <strong>{getAverageFromScores(record.scores).toFixed(1)}点</strong>
+                      </div>
+                      {record.memo && <p className="record-memo">{record.memo}</p>}
+                    </div>
+                  ))
+                )}
+              </div>
+            </article>
+          </section>
+
+          <section className="result-panel full-width">
+            <div className="panel-header">
+              <h2>模試を追加</h2>
             </div>
-          </div>
-        </section>
-      </main>
+            <form onSubmit={saveMockResult} className="result-form">
+              <div className="two-column">
+                <label>
+                  模試名
+                  <input
+                    type="text"
+                    value={mockForm.name}
+                    onChange={(event) => handleMockFieldChange('name', event.target.value)}
+                    placeholder="例：5月学力診断"
+                  />
+                </label>
+                <label>
+                  実施日
+                  <input
+                    type="date"
+                    value={mockForm.date}
+                    onChange={(event) => handleMockFieldChange('date', event.target.value)}
+                  />
+                </label>
+              </div>
+
+              <div className="score-grid">
+                {SUBJECT_KEYS.map((subject) => (
+                  <label key={subject}>
+                    {SUBJECT_LABELS[subject]}
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      value={mockForm.scores[subject]}
+                      onChange={(event) => updateMockScore(subject, event.target.value)}
+                    />
+                  </label>
+                ))}
+              </div>
+
+              <label>
+                メモ
+                <textarea
+                  rows={3}
+                  value={mockForm.memo}
+                  onChange={(event) => handleMockFieldChange('memo', event.target.value)}
+                  placeholder="例：英語の長文問題に苦戦した"
+                />
+              </label>
+
+              <button type="submit" className="save-button">模試結果を保存</button>
+            </form>
+          </section>
+
+          <section className="result-panel full-width">
+            <div className="panel-header">
+              <h2>模試名ごとの比較</h2>
+            </div>
+            <div className="mock-comparison">
+              {groupedMockRecords.length === 0 ? (
+                <p className="empty-message">まだ模試の結果がありません。</p>
+              ) : (
+                groupedMockRecords.map(({ name, records }) => {
+                  const latest = records[0]
+                  const average = getAverageFromScores(latest.scores)
+                  return (
+                    <div key={name} className="mock-group">
+                      <div className="mock-head">
+                        <h3>{name}</h3>
+                        <span>平均 {average.toFixed(1)}点</span>
+                      </div>
+                      <div className="mock-grid">
+                        {records.map((record) => (
+                          <div key={record.id} className="mock-card">
+                            <div className="record-head small">
+                              <div>
+                                <strong>{formatJapaneseDate(record.date)}</strong>
+                              </div>
+                              <button type="button" className="delete-button" onClick={() => deleteMockRecord(record.id)}>削除</button>
+                            </div>
+                            <div className="record-scores compact">
+                              {SUBJECT_KEYS.map((subject) => (
+                                <div key={subject} className="score-chip mini">
+                                  <span>{SUBJECT_LABELS[subject]}</span>
+                                  <b>{record.scores[subject]}点</b>
+                                </div>
+                              ))}
+                            </div>
+                            <div className="record-summary">
+                              <span>平均</span>
+                              <strong>{getAverageFromScores(record.scores).toFixed(1)}点</strong>
+                            </div>
+                            {record.memo && <p className="record-memo">{record.memo}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          </section>
+        </main>
+      ) : (
+        <div className="app-shell">
+          <main id="top" className="dashboard">
+            <section className="welcome-row">
+              <div>
+                <p className="eyebrow">YOUR STUDY, YOUR PACE</p>
+                <h1><span>心の中で思ったならッ！その時既に行動は終わっているんだッ！</span></h1>
+              </div>
+              <div className="today-summary">
+                <span className="summary-label">今日の学習時間</span>
+                <strong>{formatDuration(todayTotal)}</strong>
+                <span className="summary-sub">{todayRecords.length} セッション</span>
+              </div>
+            </section>
+
+            <div className="data-actions">
+              <button type="button" className="secondary-button" onClick={exportData}>JSONで保存</button>
+              <button type="button" className="secondary-button" onClick={() => importInputRef.current?.click()}>JSONを読み込み</button>
+              <input ref={importInputRef} type="file" accept="application/json" hidden onChange={importData} />
+              {importMessage && <p className="import-message" role="status">{importMessage}</p>}
+            </div>
+
+            <div className="main-grid">
+              <section className="timer-panel" aria-label="学習計測">
+                <div className="panel-heading">
+                  <div>
+                    <p className="eyebrow">FOCUS SESSION</p>
+                    <h2>学習を記録する</h2>
+                  </div>
+                  <span className={`session-status ${isRunning ? 'is-live' : ''}`}>
+                    <span />{isRunning ? '計測中' : '待機中'}
+                  </span>
+                </div>
+
+                <div className="mode-switch" role="tablist" aria-label="計測方法">
+                  <button type="button" role="tab" aria-selected={mode === 'stopwatch'} className={mode === 'stopwatch' ? 'selected' : ''} disabled={isRunning} onClick={() => setMode('stopwatch')}>
+                    <span className="mode-icon stopwatch-icon" />ストップウォッチ
+                  </button>
+                  <button type="button" role="tab" aria-selected={mode === 'timer'} className={mode === 'timer' ? 'selected' : ''} disabled={isRunning} onClick={() => setMode('timer')}>
+                    <span className="mode-icon timer-icon" />タイマー
+                  </button>
+                </div>
+
+                {mode === 'timer' && (
+                  <label className="duration-control">
+                    <span>時間を設定</span>
+                    <span className="duration-input-wrap">
+                      <input type="number" min="1" max="1440" value={durationMinutes} disabled={isRunning} onChange={(event) => setDurationMinutes(Math.min(1440, Math.max(1, Number(event.target.value) || 1)))} />
+                      <span>分</span>
+                    </span>
+                  </label>
+                )}
+
+                <div className={`clock-face ${isRunning ? 'clock-running' : ''}`} aria-live="off">
+                  <span className="clock-caption">{activeMode === 'timer' && isRunning ? 'REMAINING' : 'ELAPSED TIME'}</span>
+                  <strong>{formatDuration(displayedMs)}</strong>
+                  <span className="clock-decoration" />
+                </div>
+
+                <div className="session-fields">
+                  <label className="field-label" htmlFor="subject-select">教科</label>
+                  <select id="subject-select" value={selectedSubjectId} disabled={isRunning} onChange={(event) => setSelectedSubjectId(event.target.value)}>
+                    {subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.name}</option>)}
+                  </select>
+                  <label className="field-label" htmlFor="study-note">学習メモ <span>任意</span></label>
+                  <input id="study-note" className="memo-input" type="text" placeholder="例：二次関数の問題演習" value={memo} onChange={(event) => setMemo(event.target.value)} maxLength={100} />
+                </div>
+
+                <div className="timer-actions">
+                  {!isRunning ? (
+                    <button type="button" className="start-button" onClick={startSession}><span className="play-icon" />計測を開始</button>
+                  ) : (
+                    <button type="button" className="stop-button" onClick={stopAndRecord}><span className="stop-icon" />記録して停止</button>
+                  )}
+                  <p>{isRunning ? '停止するとここまでの時間を記録します' : '途中で停止した場合も、その時点で記録されます'}</p>
+                </div>
+
+                <div className="weekly-goal">
+                  <div className="weekly-goal-heading">
+                    <div><p className="eyebrow">THIS WEEK</p><h3>今週の目標勉強時間</h3></div>
+                    <label className="weekly-goal-input">
+                      <input type="number" min="1" max="168" step="0.5" value={weeklyGoalHours} onChange={(event) => setWeeklyGoalHours(Math.min(168, Math.max(1, Number(event.target.value) || 1)))} aria-label="今週の目標勉強時間" />
+                      <span>時間</span>
+                    </label>
+                  </div>
+                  <div className="weekly-goal-summary">
+                    <strong>{formatDuration(weeklyTotal)}</strong>
+                    <span>{weeklyGoalReached ? '今週の目標を達成しました' : `あと ${formatDuration(weeklyGoalMs - weeklyTotal)} で達成`}</span>
+                  </div>
+                  <div className="weekly-progress-track" role="progressbar" aria-label="今週の目標達成率" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(weeklyProgress)}>
+                    <span className={weeklyGoalReached ? 'is-complete' : ''} style={{ width: `${weeklyProgress}%` }} />
+                  </div>
+                </div>
+              </section>
+
+              <aside className="side-column">
+                <section className="manual-panel">
+                  <div className="section-heading">
+                    <div><p className="eyebrow">PAST SESSION</p><h2>過去の学習を記録</h2></div>
+                  </div>
+                  <form className="manual-form" onSubmit={addPastRecord}>
+                    <label>教科
+                      <select value={pastSubjectId} onChange={(event) => setPastSubjectId(event.target.value)}>
+                        {subjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.name}</option>)}
+                      </select>
+                    </label>
+                    <label>開始日時
+                      <input type="datetime-local" value={pastStartedAt} onChange={(event) => setPastStartedAt(event.target.value)} required />
+                    </label>
+                    <label>学習時間（分）
+                      <input type="number" min="1" max="1440" step="1" value={pastDurationMinutes} onChange={(event) => setPastDurationMinutes(event.target.value)} required />
+                    </label>
+                    <label>学習した量
+                      <span className="quantity-inputs">
+                        <input type="number" min="0.01" step="any" value={pastQuantity} onChange={(event) => setPastQuantity(event.target.value)} required aria-label="学習した量" />
+                        <input type="text" value={pastQuantityUnit} onChange={(event) => setPastQuantityUnit(event.target.value)} maxLength={12} required aria-label="量の単位" placeholder="ページ、問など" />
+                      </span>
+                    </label>
+                    <label className="manual-memo-field">学習メモ <span>任意</span>
+                      <input type="text" value={pastMemo} onChange={(event) => setPastMemo(event.target.value)} maxLength={100} placeholder="例：二次関数の問題演習" />
+                    </label>
+                    <button className="manual-submit" type="submit">過去の学習を追加</button>
+                  </form>
+                  {pastRecordMessage && <p className="manual-status" role="status">{pastRecordMessage}</p>}
+                </section>
+
+                <section className="subjects-panel">
+                  <div className="section-heading">
+                    <div><p className="eyebrow">YOUR SUBJECTS</p><h2>教科</h2></div>
+                    <span className="subject-count">{subjects.length} 教科</span>
+                  </div>
+                  <div className="subject-list">
+                    {subjects.map((subject, index) => (
+                      <div className="subject-row" key={subject.id}>
+                        <span className={`subject-swatch swatch-${index % 5}`} />
+                        <span>{subject.name}</span>
+                        {subject.custom && <span className="custom-label">追加</span>}
+                        {subject.custom && <button className="remove-subject" type="button" aria-label={`${subject.name}を削除`} disabled={isRunning} onClick={() => {
+                          setSubjects((current) => current.filter((item) => item.id !== subject.id))
+                          if (selectedSubjectId === subject.id) setSelectedSubjectId(DEFAULT_SUBJECTS[0].id)
+                        }}>×</button>}
+                      </div>
+                    ))}
+                  </div>
+                  <form className="add-subject-form" onSubmit={addSubject}>
+                    <input aria-label="追加する教科名" placeholder="教科を追加" value={newSubject} onChange={(event) => setNewSubject(event.target.value)} maxLength={20} />
+                    <button type="submit" aria-label="教科を追加" disabled={isRunning || !newSubject.trim()}><span>+</span></button>
+                  </form>
+                </section>
+
+                <section className="recent-panel">
+                  <div className="section-heading">
+                    <div><p className="eyebrow">STUDY RECORDS</p><h2>学習記録</h2></div>
+                    <span className="record-count">{records.length} 件</span>
+                  </div>
+                  {sortedRecords.length ? (
+                    <ul className="record-list" tabIndex={0} aria-label="学習記録一覧">
+                      {sortedRecords.map((record) => (
+                        <li className="record-row" key={record.id}>
+                          <span className="record-dot" />
+                          <div className="record-info">
+                            <strong>{record.subjectName}</strong>
+                            <span>{formatClock(record.startedAt)} – {formatClock(record.endedAt)}{record.quantity !== undefined ? ` ・ ${record.quantity} ${record.quantityUnit ?? ''}` : ''}{record.memo ? ` ・ ${record.memo}` : ''}</span>
+                          </div>
+                          <b>{formatDuration(record.durationMs).slice(0, 5)}</b>
+                          <button className="delete-record" type="button" aria-label={`${record.subjectName}の学習記録を削除`} onClick={() => deleteRecord(record.id)}>×</button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : <p className="empty-records">学習記録はありません。</p>}
+                </section>
+              </aside>
+            </div>
+
+            <section className="chart-panel">
+              <div className="chart-heading">
+                <div><p className="eyebrow">LAST 7 DAYS</p><h2>学習の記録</h2></div>
+                <div className="chart-legend"><span />学習時間</div>
+              </div>
+              <div className="chart-area">
+                {recordedDays.length > 0 && <div className="chart-guides" aria-hidden="true"><span>{chartScaleHours}h</span><span>{chartScaleHours / 2}h</span><span>0h</span></div>}
+                <div className="chart-scroll" role="region" aria-label="直近3週間の学習記録。横にスクロールできます" tabIndex={0}>
+                  {recordedDays.length > 0 ? (
+                    <div className="chart-bars">
+                      {recordedDays.map((day) => {
+                        const height = Math.min(100, (day.total / chartScaleMs) * 100)
+                        return <div className="chart-day" key={day.key} title={`${day.key}: ${formatDuration(day.total)}`}>
+                          <span className="bar-label"><span>{day.label}</span><span>{day.dateLabel}</span></span>
+                          <div className="bar-track"><span className={`bar-fill ${day.key === todayKey ? 'bar-today' : ''}`} style={{ height: `${height}%` }} /></div>
+                          <span className="bar-value">{(day.total / 3_600_000).toFixed(day.total >= 3_600_000 ? 0 : 1)}h</span>
+                        </div>
+                      })}
+                    </div>
+                  ) : <p className="chart-empty">直近3週間の学習記録はありません。</p>}
+                </div>
+              </div>
+            </section>
+          </main>
+        </div>
+      )}
     </div>
   )
 }
