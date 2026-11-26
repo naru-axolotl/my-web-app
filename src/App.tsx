@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
-type SubjectKey = 'japanese' | 'math' | 'english' | 'science' | 'social'
 type ScoreMap = Record<string, number>
 type ResultSubject = { id: string; name: string; custom?: boolean }
+type SubjectMetaValues = { deviation: string; rank: string; total: string }
+type SubjectMetaSaved = { deviation?: number; rank?: number; totalCount?: number }
 type ExamRecord = {
   id: string
   grade: number
@@ -14,6 +15,7 @@ type ExamRecord = {
   deviation?: number
   rank?: number
   totalCount?: number
+  subjectMeta?: Record<string, SubjectMetaSaved>
 }
 type MockRecord = {
   id: string
@@ -24,6 +26,7 @@ type MockRecord = {
   deviation?: number
   rank?: number
   totalCount?: number
+  subjectMeta?: Record<string, SubjectMetaSaved>
 }
 type Subject = { id: string; name: string; custom?: boolean }
 type StudyRecord = {
@@ -39,33 +42,11 @@ type StudyRecord = {
 }
 type Mode = 'stopwatch' | 'timer'
 
-const SUBJECT_KEYS: SubjectKey[] = ['japanese', 'math', 'english', 'science', 'social']
-const SUBJECT_LABELS: Record<SubjectKey, string> = {
-  japanese: '国語',
-  math: '数学',
-  english: '英語',
-  science: '理科',
-  social: '社会',
-}
-const EMPTY_SCORE_VALUES: Record<SubjectKey, string> = {
-  japanese: '',
-  math: '',
-  english: '',
-  science: '',
-  social: '',
-}
 const STORAGE_KEYS = {
   exams: 'result-log-exams-v1',
   mocks: 'result-log-mocks-v1',
   resultSubjects: 'result-log-subjects-v1',
 }
-const DEFAULT_RESULT_SUBJECTS: ResultSubject[] = [
-  { id: 'japanese', name: '国語' },
-  { id: 'math', name: '数学' },
-  { id: 'english', name: '英語' },
-  { id: 'science', name: '理科' },
-  { id: 'social', name: '社会' },
-]
 const DEFAULT_SUBJECTS: Subject[] = [
   { id: 'japanese', name: '国語' },
   { id: 'math', name: '数学' },
@@ -73,6 +54,7 @@ const DEFAULT_SUBJECTS: Subject[] = [
   { id: 'science', name: '理科' },
   { id: 'social', name: '社会' },
 ]
+const MAX_RESULT_SCORE = 1000
 const DAY_MS = 24 * 60 * 60 * 1000
 const RECORDS_KEY = 'studylog-records-v1'
 const SUBJECTS_KEY = 'studylog-subjects-v1'
@@ -123,18 +105,67 @@ function loadStored<T>(key: string, fallback: T): T {
   }
 }
 
-function createEmptyScores(): Record<SubjectKey, string> {
-  return { ...EMPTY_SCORE_VALUES }
-}
-
 function createEmptyResultScores(subjects: ResultSubject[]): Record<string, string> {
   return Object.fromEntries(subjects.map((subject) => [subject.id, '']))
+}
+
+function createEmptyResultMeta(subjects: ResultSubject[]): Record<string, SubjectMetaValues> {
+  return Object.fromEntries(subjects.map((subject) => [subject.id, { deviation: '', rank: '', total: '' }]))
+}
+
+function clampResultScore(value: number) {
+  return Math.min(MAX_RESULT_SCORE, Math.max(0, Number.isFinite(value) ? value : 0))
 }
 
 function getAverageFromScores(scores: ScoreMap) {
   const validScores = Object.values(scores).filter((score) => Number.isFinite(score) && score >= 0)
   if (validScores.length === 0) return 0
   return validScores.reduce((sum, score) => sum + score, 0) / validScores.length
+}
+
+function collectEnteredResultData(subjects: ResultSubject[], scores: Record<string, string>, subjectMeta: Record<string, SubjectMetaValues> | undefined) {
+  const nextScores: ScoreMap = {}
+  const nextMeta: Record<string, SubjectMetaSaved> = {}
+
+  for (const subject of subjects) {
+    const rawValue = scores[subject.id]
+    const trimmedValue = rawValue === undefined ? '' : String(rawValue).trim()
+    const hasScore = trimmedValue !== ''
+    if (hasScore) {
+      const numericValue = Number(trimmedValue)
+      if (Number.isFinite(numericValue)) {
+        nextScores[subject.id] = clampResultScore(numericValue)
+      }
+    }
+
+    const rawMeta = subjectMeta?.[subject.id] ?? { deviation: '', rank: '', total: '' }
+    const metaPayload: SubjectMetaSaved = {}
+    const deviation = rawMeta.deviation.trim()
+    const rank = rawMeta.rank.trim()
+    const total = rawMeta.total.trim()
+
+    if (deviation !== '') {
+      const parsedDeviation = Number(deviation)
+      if (Number.isFinite(parsedDeviation)) metaPayload.deviation = parsedDeviation
+    }
+    if (rank !== '') {
+      const parsedRank = parseInteger(rank, 0)
+      if (parsedRank > 0) metaPayload.rank = parsedRank
+    }
+    if (total !== '') {
+      const parsedTotal = parseInteger(total, 0)
+      if (parsedTotal > 0) metaPayload.totalCount = parsedTotal
+    }
+
+    if (Object.keys(metaPayload).length > 0) {
+      nextMeta[subject.id] = metaPayload
+    }
+  }
+
+  return {
+    scores: nextScores,
+    subjectMeta: nextMeta,
+  }
 }
 
 function formatJapaneseDate(dateValue: string) {
@@ -173,7 +204,7 @@ function App() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [activeMenu, setActiveMenu] = useState<'results' | 'studylog'>('results')
 
-  const [resultSubjects, setResultSubjects] = useState<ResultSubject[]>(() => loadStored(STORAGE_KEYS.resultSubjects, DEFAULT_RESULT_SUBJECTS))
+  const [resultSubjects, setResultSubjects] = useState<ResultSubject[]>(() => loadStored(STORAGE_KEYS.resultSubjects, []))
   const [newResultSubject, setNewResultSubject] = useState('')
   const [subjects, setSubjects] = useState<Subject[]>(() => loadStored(SUBJECTS_KEY, DEFAULT_SUBJECTS))
   const [records, setRecords] = useState<StudyRecord[]>(() => loadStored(RECORDS_KEY, []))
@@ -199,51 +230,10 @@ function App() {
   const [pastRecordMessage, setPastRecordMessage] = useState('')
   const importInputRef = useRef<HTMLInputElement>(null)
 
-  const [examRecords, setExamRecords] = useState<ExamRecord[]>(() =>
-    loadStored(STORAGE_KEYS.exams, [
-      {
-        id: 'exam-demo-1',
-        grade: 2,
-        round: 1,
-        date: '2026-04-15',
-        memo: '英語のリスニングに時間をかけた',
-        scores: { japanese: 86, math: 92, english: 79, science: 88, social: 91 },
-      },
-      {
-        id: 'exam-demo-2',
-        grade: 2,
-        round: 2,
-        date: '2026-07-10',
-        memo: '数学の応用問題が伸びた',
-        scores: { japanese: 90, math: 96, english: 84, science: 89, social: 87 },
-      },
-    ]),
-  )
-  const [mockRecords, setMockRecords] = useState<MockRecord[]>(() =>
-    loadStored(STORAGE_KEYS.mocks, [
-      {
-        id: 'mock-demo-1',
-        name: '4月全国模試',
-        date: '2026-04-03',
-        memo: '英語の偏差値を上げたい',
-        scores: { japanese: 82, math: 78, english: 73, science: 80, social: 84 },
-      },
-      {
-        id: 'mock-demo-2',
-        name: '4月全国模試',
-        date: '2026-05-20',
-        memo: '数学をもう一段伸ばす',
-        scores: { japanese: 85, math: 87, english: 77, science: 82, social: 88 },
-      },
-      {
-        id: 'mock-demo-3',
-        name: '7月学力診断',
-        date: '2026-07-18',
-        memo: '理科の総合問題に注意',
-        scores: { japanese: 89, math: 81, english: 86, science: 74, social: 90 },
-      },
-    ]),
-  )
+  const [examRecords, setExamRecords] = useState<ExamRecord[]>(() => loadStored(STORAGE_KEYS.exams, []))
+  const [mockRecords, setMockRecords] = useState<MockRecord[]>(() => loadStored(STORAGE_KEYS.mocks, []))
+  const [examFormOpen, setExamFormOpen] = useState(true)
+  const [mockFormOpen, setMockFormOpen] = useState(true)
   const [examForm, setExamForm] = useState({
     grade: '2',
     round: '1',
@@ -252,7 +242,8 @@ function App() {
     deviation: '',
     rank: '',
     total: '',
-    scores: createEmptyResultScores(DEFAULT_RESULT_SUBJECTS),
+    scores: createEmptyResultScores([]),
+    subjectMeta: createEmptyResultMeta([]),
   })
   const [mockForm, setMockForm] = useState({
     name: '',
@@ -261,7 +252,8 @@ function App() {
     deviation: '',
     rank: '',
     total: '',
-    scores: createEmptyResultScores(DEFAULT_RESULT_SUBJECTS),
+    scores: createEmptyResultScores([]),
+    subjectMeta: createEmptyResultMeta([]),
   })
 
   useEffect(() => {
@@ -360,6 +352,12 @@ function App() {
         ...createEmptyResultScores(resultSubjects),
         ...current.scores,
       },
+      subjectMeta: Object.fromEntries(
+        resultSubjects.map((subject) => [
+          subject.id,
+          current.subjectMeta?.[subject.id] ?? { deviation: '', rank: '', total: '' },
+        ]),
+      ),
     }))
     setMockForm((current) => ({
       ...current,
@@ -367,6 +365,12 @@ function App() {
         ...createEmptyResultScores(resultSubjects),
         ...current.scores,
       },
+      subjectMeta: Object.fromEntries(
+        resultSubjects.map((subject) => [
+          subject.id,
+          current.subjectMeta?.[subject.id] ?? { deviation: '', rank: '', total: '' },
+        ]),
+      ),
     }))
   }, [resultSubjects])
 
@@ -386,6 +390,27 @@ function App() {
       .sort((a, b) => a.name.localeCompare(b.name, 'ja'))
   }, [mockRecords])
 
+  const resultTrend = useMemo(() => {
+    const entries = [
+      ...examRecords.map((record) => ({
+        label: `${record.grade}年${record.round}回`,
+        date: record.date,
+        average: getAverageFromScores(record.scores),
+      })),
+      ...mockRecords.map((record) => ({
+        label: record.name,
+        date: record.date,
+        average: getAverageFromScores(record.scores),
+      })),
+    ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+
+    const maxValue = Math.max(...entries.map((entry) => entry.average), 1)
+    return entries.map((entry) => ({
+      ...entry,
+      height: Math.max(12, (entry.average / maxValue) * 100),
+    }))
+  }, [examRecords, mockRecords])
+
   const savedExamAverage = examRecords.length > 0
     ? examRecords.reduce((sum, record) => sum + getAverageFromScores(record.scores), 0) / examRecords.length
     : 0
@@ -399,21 +424,49 @@ function App() {
   }
 
   const updateExamScore = (subjectId: string, value: string) => {
+    const nextValue = value.trim() === '' ? '' : String(clampResultScore(Number(value) || 0))
     setExamForm((current) => ({
       ...current,
       scores: {
         ...current.scores,
-        [subjectId]: value,
+        [subjectId]: nextValue,
       },
     }))
   }
 
   const updateMockScore = (subjectId: string, value: string) => {
+    const nextValue = value.trim() === '' ? '' : String(clampResultScore(Number(value) || 0))
     setMockForm((current) => ({
       ...current,
       scores: {
         ...current.scores,
-        [subjectId]: value,
+        [subjectId]: nextValue,
+      },
+    }))
+  }
+
+  const updateExamSubjectMeta = (subjectId: string, field: keyof SubjectMetaValues, value: string) => {
+    setExamForm((current) => ({
+      ...current,
+      subjectMeta: {
+        ...current.subjectMeta,
+        [subjectId]: {
+          ...(current.subjectMeta?.[subjectId] ?? { deviation: '', rank: '', total: '' }),
+          [field]: value,
+        },
+      },
+    }))
+  }
+
+  const updateMockSubjectMeta = (subjectId: string, field: keyof SubjectMetaValues, value: string) => {
+    setMockForm((current) => ({
+      ...current,
+      subjectMeta: {
+        ...current.subjectMeta,
+        [subjectId]: {
+          ...(current.subjectMeta?.[subjectId] ?? { deviation: '', rank: '', total: '' }),
+          [field]: value,
+        },
       },
     }))
   }
@@ -434,7 +487,23 @@ function App() {
   }
 
   const removeResultSubject = (id: string) => {
+    const target = resultSubjects.find((subject) => subject.id === id)
+    if (!target) return
+
+    const confirmed = window.confirm(`${target.name}を削除しますか？この教科の保存済みデータも一緒に削除されます。`)
+    if (!confirmed) return
+
     setResultSubjects((current) => current.filter((subject) => subject.id !== id))
+    setExamForm((current) => ({
+      ...current,
+      scores: Object.fromEntries(Object.entries(current.scores).filter(([subjectId]) => subjectId !== id)),
+      subjectMeta: Object.fromEntries(Object.entries(current.subjectMeta ?? {}).filter(([subjectId]) => subjectId !== id)),
+    }))
+    setMockForm((current) => ({
+      ...current,
+      scores: Object.fromEntries(Object.entries(current.scores).filter(([subjectId]) => subjectId !== id)),
+      subjectMeta: Object.fromEntries(Object.entries(current.subjectMeta ?? {}).filter(([subjectId]) => subjectId !== id)),
+    }))
   }
 
   const saveExamResult = (event: React.FormEvent<HTMLFormElement>) => {
@@ -443,12 +512,8 @@ function App() {
     const round = parseInteger(examForm.round, 0)
     if (grade <= 0 || round <= 0 || !examForm.date || resultSubjects.length === 0) return
 
-    const scores: ScoreMap = Object.fromEntries(
-      resultSubjects.map((subject) => [subject.id, parseInteger(examForm.scores[subject.id] || '0', 0)]),
-    )
-
-    const hasScore = Object.values(scores).some((score) => score > 0)
-    if (!hasScore) return
+    const { scores, subjectMeta } = collectEnteredResultData(resultSubjects, examForm.scores, examForm.subjectMeta)
+    if (Object.keys(scores).length === 0 && Object.keys(subjectMeta).length === 0) return
 
     const deviation = examForm.deviation.trim() === '' ? undefined : Number(examForm.deviation)
     const rank = examForm.rank.trim() === '' ? undefined : parseInteger(examForm.rank, 0)
@@ -464,6 +529,7 @@ function App() {
       ...(deviation !== undefined && Number.isFinite(deviation) ? { deviation } : {}),
       ...(rank !== undefined && rank > 0 ? { rank } : {}),
       ...(totalCount !== undefined && totalCount > 0 ? { totalCount } : {}),
+      ...(Object.keys(subjectMeta).length > 0 ? { subjectMeta } : {}),
     }
 
     setExamRecords((current) => {
@@ -481,6 +547,7 @@ function App() {
       rank: '',
       total: '',
       scores: createEmptyResultScores(resultSubjects),
+      subjectMeta: createEmptyResultMeta(resultSubjects),
     })
   }
 
@@ -489,12 +556,8 @@ function App() {
     const name = mockForm.name.trim()
     if (!name || !mockForm.date || resultSubjects.length === 0) return
 
-    const scores: ScoreMap = Object.fromEntries(
-      resultSubjects.map((subject) => [subject.id, parseInteger(mockForm.scores[subject.id] || '0', 0)]),
-    )
-
-    const hasScore = Object.values(scores).some((score) => score > 0)
-    if (!hasScore) return
+    const { scores, subjectMeta } = collectEnteredResultData(resultSubjects, mockForm.scores, mockForm.subjectMeta)
+    if (Object.keys(scores).length === 0 && Object.keys(subjectMeta).length === 0) return
 
     const deviation = mockForm.deviation.trim() === '' ? undefined : Number(mockForm.deviation)
     const rank = mockForm.rank.trim() === '' ? undefined : parseInteger(mockForm.rank, 0)
@@ -509,6 +572,7 @@ function App() {
       ...(deviation !== undefined && Number.isFinite(deviation) ? { deviation } : {}),
       ...(rank !== undefined && rank > 0 ? { rank } : {}),
       ...(totalCount !== undefined && totalCount > 0 ? { totalCount } : {}),
+      ...(Object.keys(subjectMeta).length > 0 ? { subjectMeta } : {}),
     }
 
     setMockRecords((current) => {
@@ -525,6 +589,7 @@ function App() {
       rank: '',
       total: '',
       scores: createEmptyResultScores(resultSubjects),
+      subjectMeta: createEmptyResultMeta(resultSubjects),
     })
   }
 
@@ -716,9 +781,7 @@ function App() {
                 {resultSubjects.map((subject) => (
                   <div className="result-subject-row" key={subject.id}>
                     <span>{subject.name}</span>
-                    {subject.custom && (
-                      <button type="button" className="delete-button" onClick={() => removeResultSubject(subject.id)}>削除</button>
-                    )}
+                    <button type="button" className="delete-button" onClick={() => removeResultSubject(subject.id)}>削除</button>
                   </div>
                 ))}
               </div>
@@ -735,106 +798,156 @@ function App() {
             </article>
 
             <article className="result-panel">
-              <div className="panel-header">
+              <div className="panel-header collapse-header">
                 <h2>定期試験を追加</h2>
+                <button type="button" className="collapse-toggle" aria-expanded={examFormOpen} onClick={() => setExamFormOpen((current) => !current)}>
+                  {examFormOpen ? '閉じる' : '開く'}
+                </button>
               </div>
-              <form onSubmit={saveExamResult} className="result-form">
-                <div className="two-column">
+              {examFormOpen && (
+                <form onSubmit={saveExamResult} className="result-form">
+                  <div className="two-column">
+                    <label>
+                      学年
+                      <input
+                        type="number"
+                        min="1"
+                        max="6"
+                        value={examForm.grade}
+                        onChange={(event) => handleExamFieldChange('grade', event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      第何回
+                      <input
+                        type="number"
+                        min="1"
+                        max="20"
+                        value={examForm.round}
+                        onChange={(event) => handleExamFieldChange('round', event.target.value)}
+                      />
+                    </label>
+                  </div>
+
                   <label>
-                    学年
+                    実施日
                     <input
-                      type="number"
-                      min="1"
-                      max="6"
-                      value={examForm.grade}
-                      onChange={(event) => handleExamFieldChange('grade', event.target.value)}
+                      type="date"
+                      value={examForm.date}
+                      onChange={(event) => handleExamFieldChange('date', event.target.value)}
                     />
                   </label>
-                  <label>
-                    第何回
-                    <input
-                      type="number"
-                      min="1"
-                      max="20"
-                      value={examForm.round}
-                      onChange={(event) => handleExamFieldChange('round', event.target.value)}
-                    />
-                  </label>
-                </div>
 
-                <label>
-                  実施日
-                  <input
-                    type="date"
-                    value={examForm.date}
-                    onChange={(event) => handleExamFieldChange('date', event.target.value)}
-                  />
-                </label>
+                  {resultSubjects.length === 0 ? (
+                    <p className="empty-message full-span">まずは教科を追加してください。</p>
+                  ) : (
+                    <>
+                      <p className="helper-text full-span">入力した教科だけが結果に保存されます。未入力の教科はそのまま無視されます。</p>
+                      <div className="score-grid">
+                        {resultSubjects.map((subject) => {
+                          const subjectMeta = examForm.subjectMeta?.[subject.id] ?? { deviation: '', rank: '', total: '' }
+                          return (
+                            <div key={subject.id} className="subject-score-card">
+                              <label>
+                                {subject.name}
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="1000"
+                                  value={examForm.scores[subject.id] ?? ''}
+                                  onChange={(event) => updateExamScore(subject.id, event.target.value)}
+                                />
+                              </label>
+                              <div className="subject-meta-grid">
+                                <label>
+                                  偏差値
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    max="100"
+                                    step="0.1"
+                                    value={subjectMeta.deviation}
+                                    onChange={(event) => updateExamSubjectMeta(subject.id, 'deviation', event.target.value)}
+                                  />
+                                </label>
+                                <label>
+                                  順位
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    step="1"
+                                    value={subjectMeta.rank}
+                                    onChange={(event) => updateExamSubjectMeta(subject.id, 'rank', event.target.value)}
+                                  />
+                                </label>
+                                <label>
+                                  全体人数
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    step="1"
+                                    value={subjectMeta.total}
+                                    onChange={(event) => updateExamSubjectMeta(subject.id, 'total', event.target.value)}
+                                  />
+                                </label>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </>
+                  )}
 
-                <div className="score-grid">
-                  {resultSubjects.map((subject) => (
-                    <label key={subject.id}>
-                      {subject.name}
+                  <div className="two-column meta-column">
+                    <label>
+                      偏差値
                       <input
                         type="number"
                         min="0"
                         max="100"
-                        value={examForm.scores[subject.id] ?? ''}
-                        onChange={(event) => updateExamScore(subject.id, event.target.value)}
+                        step="0.1"
+                        value={examForm.deviation}
+                        onChange={(event) => handleExamFieldChange('deviation', event.target.value)}
+                        placeholder="例：60"
                       />
                     </label>
-                  ))}
-                </div>
+                    <label>
+                      順位
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={examForm.rank}
+                        onChange={(event) => handleExamFieldChange('rank', event.target.value)}
+                        placeholder="例：12"
+                      />
+                    </label>
+                    <label className="full-span-field">
+                      全体人数
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={examForm.total}
+                        onChange={(event) => handleExamFieldChange('total', event.target.value)}
+                        placeholder="例：180"
+                      />
+                    </label>
+                  </div>
 
-                <div className="two-column meta-column">
                   <label>
-                    偏差値
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      step="0.1"
-                      value={examForm.deviation}
-                      onChange={(event) => handleExamFieldChange('deviation', event.target.value)}
-                      placeholder="例：60"
+                    メモ
+                    <textarea
+                      rows={3}
+                      value={examForm.memo}
+                      onChange={(event) => handleExamFieldChange('memo', event.target.value)}
+                      placeholder="例：英語のリスニングが良くなった"
                     />
                   </label>
-                  <label>
-                    順位
-                    <input
-                      type="number"
-                      min="1"
-                      step="1"
-                      value={examForm.rank}
-                      onChange={(event) => handleExamFieldChange('rank', event.target.value)}
-                      placeholder="例：12"
-                    />
-                  </label>
-                  <label className="full-span-field">
-                    全体人数
-                    <input
-                      type="number"
-                      min="1"
-                      step="1"
-                      value={examForm.total}
-                      onChange={(event) => handleExamFieldChange('total', event.target.value)}
-                      placeholder="例：180"
-                    />
-                  </label>
-                </div>
 
-                <label>
-                  メモ
-                  <textarea
-                    rows={3}
-                    value={examForm.memo}
-                    onChange={(event) => handleExamFieldChange('memo', event.target.value)}
-                    placeholder="例：英語のリスニングが良くなった"
-                  />
-                </label>
-
-                <button type="submit" className="save-button">結果を保存</button>
-              </form>
+                  <button type="submit" className="save-button">結果を保存</button>
+                </form>
+              )}
             </article>
 
             <article className="result-panel">
@@ -855,17 +968,40 @@ function App() {
                         <button type="button" className="delete-button" onClick={() => deleteExamRecord(record.id)}>削除</button>
                       </div>
                       <div className="record-scores">
-                        {SUBJECT_KEYS.map((subject) => (
-                          <div key={subject} className="score-chip">
-                            <span>{SUBJECT_LABELS[subject]}</span>
-                            <b>{record.scores[subject]}点</b>
-                          </div>
-                        ))}
+                        {Object.entries(record.scores).map(([subjectId, score]) => {
+                          const subjectName = resultSubjects.find((subject) => subject.id === subjectId)?.name ?? '教科'
+                          return (
+                            <div key={subjectId} className="score-chip">
+                              <span>{subjectName}</span>
+                              <b>{score}点</b>
+                            </div>
+                          )
+                        })}
                       </div>
+                      {resultSubjects.some((subject) => record.subjectMeta?.[subject.id]) && (
+                        <div className="record-meta">
+                          {resultSubjects.flatMap((subject) => {
+                            const meta = record.subjectMeta?.[subject.id]
+                            if (!meta) return []
+                            return [
+                              ...(meta.deviation !== undefined ? [`${subject.name}: 偏差値 ${meta.deviation}`] : []),
+                              ...(meta.rank !== undefined ? [`${subject.name}: 順位 ${meta.rank}位`] : []),
+                              ...(meta.totalCount !== undefined ? [`${subject.name}: 全体 ${meta.totalCount}人`] : []),
+                            ]
+                          }).map((value) => <span key={value}>{value}</span>)}
+                        </div>
+                      )}
                       <div className="record-summary">
                         <span>平均</span>
                         <strong>{getAverageFromScores(record.scores).toFixed(1)}点</strong>
                       </div>
+                      {(record.deviation !== undefined || record.rank !== undefined || record.totalCount !== undefined) && (
+                        <div className="record-meta">
+                          {record.deviation !== undefined && <span>偏差値 {record.deviation}</span>}
+                          {record.rank !== undefined && <span>順位 {record.rank}位</span>}
+                          {record.totalCount !== undefined && <span>全体 {record.totalCount}人</span>}
+                        </div>
+                      )}
                       {record.memo && <p className="record-memo">{record.memo}</p>}
                     </div>
                   ))
@@ -876,56 +1012,169 @@ function App() {
 
           <section className="result-panel full-width">
             <div className="panel-header">
-              <h2>模試を追加</h2>
+              <h2>成績の推移</h2>
             </div>
-            <form onSubmit={saveMockResult} className="result-form">
-              <div className="two-column">
-                <label>
-                  模試名
-                  <input
-                    type="text"
-                    value={mockForm.name}
-                    onChange={(event) => handleMockFieldChange('name', event.target.value)}
-                    placeholder="例：5月学力診断"
-                  />
-                </label>
-                <label>
-                  実施日
-                  <input
-                    type="date"
-                    value={mockForm.date}
-                    onChange={(event) => handleMockFieldChange('date', event.target.value)}
-                  />
-                </label>
+            {resultTrend.length === 0 ? (
+              <p className="empty-message">まだ記録がありません。</p>
+            ) : (
+              <div className="trend-chart" aria-label="成績推移グラフ">
+                <div className="trend-axis" aria-hidden="true">
+                  <span>1000</span>
+                  <span>500</span>
+                  <span>0</span>
+                </div>
+                <div className="trend-bars">
+                  {resultTrend.map((entry) => (
+                    <div key={`${entry.label}-${entry.date}`} className="trend-point">
+                      <span className="trend-value">{entry.average.toFixed(0)}点</span>
+                      <span className="trend-bar" style={{ height: `${entry.height}%` }} />
+                      <small>{entry.label}</small>
+                    </div>
+                  ))}
+                </div>
               </div>
+            )}
+          </section>
 
-              <div className="score-grid">
-                {SUBJECT_KEYS.map((subject) => (
-                  <label key={subject}>
-                    {SUBJECT_LABELS[subject]}
+          <section className="result-panel full-width">
+            <div className="panel-header collapse-header">
+              <h2>模試を追加</h2>
+              <button type="button" className="collapse-toggle" aria-expanded={mockFormOpen} onClick={() => setMockFormOpen((current) => !current)}>
+                {mockFormOpen ? '閉じる' : '開く'}
+              </button>
+            </div>
+            {mockFormOpen && (
+              <form onSubmit={saveMockResult} className="result-form">
+                <div className="two-column">
+                  <label>
+                    模試名
+                    <input
+                      type="text"
+                      value={mockForm.name}
+                      onChange={(event) => handleMockFieldChange('name', event.target.value)}
+                      placeholder="例：5月学力診断"
+                    />
+                  </label>
+                  <label>
+                    実施日
+                    <input
+                      type="date"
+                      value={mockForm.date}
+                      onChange={(event) => handleMockFieldChange('date', event.target.value)}
+                    />
+                  </label>
+                </div>
+
+                {resultSubjects.length === 0 ? (
+                  <p className="empty-message full-span">まずは教科を追加してください。</p>
+                ) : (
+                  <>
+                    <p className="helper-text full-span">入力した教科だけが保存されます。未入力の教科は結果に含めません。</p>
+                    <div className="score-grid">
+                    {resultSubjects.map((subject) => {
+                      const subjectMeta = mockForm.subjectMeta?.[subject.id] ?? { deviation: '', rank: '', total: '' }
+                      return (
+                        <div key={subject.id} className="subject-score-card">
+                          <label>
+                            {subject.name}
+                            <input
+                              type="number"
+                              min="0"
+                              max="1000"
+                              value={mockForm.scores[subject.id] ?? ''}
+                              onChange={(event) => updateMockScore(subject.id, event.target.value)}
+                            />
+                          </label>
+                          <div className="subject-meta-grid">
+                            <label>
+                              偏差値
+                              <input
+                                type="number"
+                                min="0"
+                                max="100"
+                                step="0.1"
+                                value={subjectMeta.deviation}
+                                onChange={(event) => updateMockSubjectMeta(subject.id, 'deviation', event.target.value)}
+                              />
+                            </label>
+                            <label>
+                              順位
+                              <input
+                                type="number"
+                                min="1"
+                                step="1"
+                                value={subjectMeta.rank}
+                                onChange={(event) => updateMockSubjectMeta(subject.id, 'rank', event.target.value)}
+                              />
+                            </label>
+                            <label>
+                              全体人数
+                              <input
+                                type="number"
+                                min="1"
+                                step="1"
+                                value={subjectMeta.total}
+                                onChange={(event) => updateMockSubjectMeta(subject.id, 'total', event.target.value)}
+                              />
+                            </label>
+                          </div>
+                        </div>
+                      )
+                    })}
+                    </div>
+                  </>
+                )}
+
+                <div className="two-column meta-column">
+                  <label>
+                    偏差値
                     <input
                       type="number"
                       min="0"
                       max="100"
-                      value={mockForm.scores[subject]}
-                      onChange={(event) => updateMockScore(subject, event.target.value)}
+                      step="0.1"
+                      value={mockForm.deviation}
+                      onChange={(event) => handleMockFieldChange('deviation', event.target.value)}
+                      placeholder="例：60"
                     />
                   </label>
-                ))}
-              </div>
+                  <label>
+                    順位
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={mockForm.rank}
+                      onChange={(event) => handleMockFieldChange('rank', event.target.value)}
+                      placeholder="例：12"
+                    />
+                  </label>
+                  <label className="full-span-field">
+                    全体人数
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={mockForm.total}
+                      onChange={(event) => handleMockFieldChange('total', event.target.value)}
+                      placeholder="例：180"
+                    />
+                  </label>
+                </div>
 
-              <label>
-                メモ
-                <textarea
-                  rows={3}
-                  value={mockForm.memo}
-                  onChange={(event) => handleMockFieldChange('memo', event.target.value)}
-                  placeholder="例：英語の長文問題に苦戦した"
-                />
-              </label>
+                <label>
+                  メモ
+                  <textarea
+                    rows={3}
+                    value={mockForm.memo}
+                    onChange={(event) => handleMockFieldChange('memo', event.target.value)}
+                    placeholder="例：英語の長文問題に苦戦した"
+                  />
+                </label>
 
-              <button type="submit" className="save-button">模試結果を保存</button>
-            </form>
+                <button type="submit" className="save-button">模試結果を保存</button>
+              </form>
+            )}
           </section>
 
           <section className="result-panel full-width">
@@ -955,17 +1204,40 @@ function App() {
                               <button type="button" className="delete-button" onClick={() => deleteMockRecord(record.id)}>削除</button>
                             </div>
                             <div className="record-scores compact">
-                              {SUBJECT_KEYS.map((subject) => (
-                                <div key={subject} className="score-chip mini">
-                                  <span>{SUBJECT_LABELS[subject]}</span>
-                                  <b>{record.scores[subject]}点</b>
-                                </div>
-                              ))}
+                              {Object.entries(record.scores).map(([subjectId, score]) => {
+                                const subjectName = resultSubjects.find((subject) => subject.id === subjectId)?.name ?? '教科'
+                                return (
+                                  <div key={subjectId} className="score-chip mini">
+                                    <span>{subjectName}</span>
+                                    <b>{score}点</b>
+                                  </div>
+                                )
+                              })}
                             </div>
+                            {resultSubjects.some((subject) => record.subjectMeta?.[subject.id]) && (
+                              <div className="record-meta">
+                                {resultSubjects.flatMap((subject) => {
+                                  const meta = record.subjectMeta?.[subject.id]
+                                  if (!meta) return []
+                                  return [
+                                    ...(meta.deviation !== undefined ? [`${subject.name}: 偏差値 ${meta.deviation}`] : []),
+                                    ...(meta.rank !== undefined ? [`${subject.name}: 順位 ${meta.rank}位`] : []),
+                                    ...(meta.totalCount !== undefined ? [`${subject.name}: 全体 ${meta.totalCount}人`] : []),
+                                  ]
+                                }).map((value) => <span key={value}>{value}</span>)}
+                              </div>
+                            )}
                             <div className="record-summary">
                               <span>平均</span>
                               <strong>{getAverageFromScores(record.scores).toFixed(1)}点</strong>
                             </div>
+                            {(record.deviation !== undefined || record.rank !== undefined || record.totalCount !== undefined) && (
+                              <div className="record-meta">
+                                {record.deviation !== undefined && <span>偏差値 {record.deviation}</span>}
+                                {record.rank !== undefined && <span>順位 {record.rank}位</span>}
+                                {record.totalCount !== undefined && <span>全体 {record.totalCount}人</span>}
+                              </div>
+                            )}
                             {record.memo && <p className="record-memo">{record.memo}</p>}
                           </div>
                         ))}
